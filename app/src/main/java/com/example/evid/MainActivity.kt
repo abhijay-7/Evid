@@ -315,7 +315,7 @@ fun FFmpegTestScreen() {
                             }
                             val outputFile = File(context.getExternalFilesDir(null), "clipped_output.mp4")
                             val outputFilename = prepareFilename(filename, "clipped_output.mp4", inputUri, isAudio = false)
-                            val command = "-y -i $inputSaf -ss 00:00:00 -t 10 -c copy ${outputFile.absolutePath}"
+                            val command = "-y -i $inputSaf -ss 00:00:00 -t 10 -c:v mpeg4 -preset fast -crf 0 -c:a aac ${outputFile.absolutePath}"
                             withContext(Dispatchers.Main) {
                                 ffmpegLog = ""
                                 progress = 0f
@@ -375,7 +375,7 @@ fun FFmpegTestScreen() {
                             }
                             val outputFile = File(context.getExternalFilesDir(null), "scaled_output.mp4")
                             val outputFilename = prepareFilename(filename, "scaled_output.mp4", inputUri, isAudio = false)
-                            val command = "-y -i $inputSaf -vf scale=640:360 -c:a copy ${outputFile.absolutePath}"
+                            val command = "-y -i $inputSaf -vf scale=640:360 -c:v libx264 -crf 0 -preset medium  -c:a copy ${outputFile.absolutePath}"
                             withContext(Dispatchers.Main) {
                                 ffmpegLog = ""
                                 progress = 0f
