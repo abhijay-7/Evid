@@ -8,6 +8,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Environment
 import android.provider.MediaStore
+import android.util.Log
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -35,6 +36,8 @@ import com.example.evid.ui.theme.EviDTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.async
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
@@ -112,6 +115,7 @@ fun FFmpegTestScreen() {
     var scaleHeight by remember { mutableStateOf("") }
 
 // Updated selectInputFile launcher
+
     val selectInputFile = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
     ) { uri ->
@@ -123,10 +127,8 @@ fun FFmpegTestScreen() {
                 )
                 inputUri = it
                 outputText = "Selected input: $it"
-                // Fetch video duration and resolution using a temporary file
                 coroutineScope.launch(Dispatchers.IO) {
                     try {
-                        // Copy SAF input to temporary file
                         val tempFile = File(context.getExternalFilesDir(null), "temp_probe.mp4")
                         try {
                             withTimeout(30000) {
@@ -148,7 +150,6 @@ fun FFmpegTestScreen() {
                             return@launch
                         }
 
-                        // Probe duration and resolution in one command
                         val probeSession = FFprobeKit.execute(
                             "-i ${tempFile.absolutePath} -show_entries format=duration:stream=width,height -select_streams v:0 -v quiet -of json"
                         )
@@ -169,6 +170,7 @@ fun FFmpegTestScreen() {
                                 originalHeight = height
                                 scaleWidth = width.toString()
                                 scaleHeight = height.toString()
+                                outputText = "Video info: ${width}x${height}, ${duration}s"
                             }
                         } else {
                             withContext(Dispatchers.Main) {
@@ -402,7 +404,6 @@ fun FFmpegTestScreen() {
                         isProcessing = true
                         coroutineScope.launch(Dispatchers.IO) {
                             try {
-                                // Validate input with FFprobe
                                 val inputSaf = FFmpegKitConfig.getSafParameterForRead(context, inputUri!!)
                                 if (inputSaf.isEmpty()) {
                                     withContext(Dispatchers.Main) {
@@ -437,7 +438,6 @@ fun FFmpegTestScreen() {
                                     return@launch
                                 }
 
-                                // Copy SAF input to temporary file for clipping
                                 val tempFile = File(context.getExternalFilesDir(null), "temp_clip.mp4")
                                 try {
                                     withTimeout(30000) {
@@ -463,23 +463,48 @@ fun FFmpegTestScreen() {
                                 val outputFile = File(context.getExternalFilesDir(null), "clipped.mp4")
                                 val outputFilename = prepareFilename(filename, "clipped.mp4", inputUri!!, isAudio = false)
                                 val duration = endTime - startTime
-                                val command = "-y -i ${tempFile.absolutePath} -ss $startTime -t $duration -c:v libx264 -preset fast -crf 23 -c:a aac ${outputFile.absolutePath}"
+                                val progressPipe = File(context.getExternalFilesDir(null), "progress.txt")
+                                val command = "-y -i ${tempFile.absolutePath} -ss $startTime -t $duration -c:v libx264 -preset fast -crf 23 -c:a aac -progress ${progressPipe.absolutePath} -stats_period 0.1 ${outputFile.absolutePath}"
 
                                 withContext(Dispatchers.Main) {
                                     ffmpegLog = ""
                                     progress = 0f
                                 }
                                 FFmpegKitConfig.enableStatisticsCallback { statistics ->
+                                    Log.d("FFmpeg", "Statistics: time=${statistics.time}")
                                     coroutineScope.launch(Dispatchers.Main) {
-                                        inputDuration?.let { duration ->
-                                            val timeSeconds = statistics.time / 1000.0
-                                            val progressPercent = (timeSeconds / duration).coerceIn(0.0, 1.0).toFloat()
-                                            progress = progressPercent
+                                        val duration = videoDuration.takeIf { it > 0 } ?: duration // Use clip duration
+                                        val timeSeconds = statistics.time / 1000.0
+                                        val progressPercent = (timeSeconds / duration).coerceIn(0.0, 1.0).toFloat()
+                                        progress = progressPercent
+                                    }
+                                }
+
+                                val progressJob = coroutineScope.launch(Dispatchers.IO) {
+                                    try {
+                                        while (isActive && !progressPipe.exists()) delay(100)
+                                        progressPipe.bufferedReader().use { reader ->
+                                            var durationMs = (duration * 1000).toLong()
+                                            while (isActive) {
+                                                val line = reader.readLine() ?: continue
+                                                if ("out_time_ms=" in line) {
+                                                    val timeMs = line.substringAfter("out_time_ms=").toLongOrNull() ?: continue
+                                                    val progressPercent = (timeMs / durationMs.toDouble()).coerceIn(0.0, 1.0).toFloat()
+                                                    withContext(Dispatchers.Main) {
+                                                        progress = progressPercent
+                                                    }
+                                                }
+                                                if ("progress=end" in line) break
+                                                delay(100)
+                                            }
                                         }
+                                    } catch (e: Exception) {
+                                        Log.e("FFmpeg", "Progress reading error: ${e.message}")
                                     }
                                 }
 
                                 val session = FFmpegKit.execute(command)
+                                progressJob.cancel()
 
                                 withContext(Dispatchers.Main) {
                                     progress = null
@@ -495,6 +520,7 @@ fun FFmpegTestScreen() {
                                 }
 
                                 tempFile.delete()
+                                progressPipe.delete()
                             } catch (e: Exception) {
                                 withContext(Dispatchers.Main) {
                                     progress = null
@@ -552,7 +578,6 @@ fun FFmpegTestScreen() {
                         isProcessing = true
                         coroutineScope.launch(Dispatchers.IO) {
                             try {
-                                // Validate input with FFprobe
                                 val inputSaf = FFmpegKitConfig.getSafParameterForRead(context, inputUri!!)
                                 if (inputSaf.isEmpty()) {
                                     withContext(Dispatchers.Main) {
@@ -587,7 +612,6 @@ fun FFmpegTestScreen() {
                                     return@launch
                                 }
 
-                                // Copy SAF input to temporary file for scaling
                                 val tempFile = File(context.getExternalFilesDir(null), "temp_scale.mp4")
                                 try {
                                     withTimeout(30000) {
@@ -612,23 +636,49 @@ fun FFmpegTestScreen() {
 
                                 val outputFile = File(context.getExternalFilesDir(null), "scaled.mp4")
                                 val outputFilename = prepareFilename(filename, "scaled.mp4", inputUri!!, isAudio = false)
-                                val command = "-y -i ${tempFile.absolutePath} -vf scale=$width:$height -c:v libx264 -preset fast -crf 23 -c:a aac ${outputFile.absolutePath}"
+                                val progressPipe = File(context.getExternalFilesDir(null), "progress.txt")
+                                val command = "-y -i ${tempFile.absolutePath} -vf scale=$width:$height -c:v libx264 -preset fast -crf 23 -c:a aac -progress ${progressPipe.absolutePath} -stats_period 0.1 ${outputFile.absolutePath}"
 
                                 withContext(Dispatchers.Main) {
                                     ffmpegLog = ""
                                     progress = 0f
                                 }
                                 FFmpegKitConfig.enableStatisticsCallback { statistics ->
+                                    Log.d("FFmpeg", "Statistics: time=${statistics.time}")
                                     coroutineScope.launch(Dispatchers.Main) {
-                                        inputDuration?.let { duration ->
-                                            val timeSeconds = statistics.time / 1000.0
-                                            val progressPercent = (timeSeconds / duration).coerceIn(0.0, 1.0).toFloat()
-                                            progress = progressPercent
+                                        val duration = videoDuration.takeIf { it > 0 } ?: 10f // Fallback
+                                        val timeSeconds = statistics.time / 1000.0
+                                        val progressPercent = (timeSeconds / duration).coerceIn(0.0, 1.0).toFloat()
+                                        progress = progressPercent
+                                    }
+                                }
+
+                                // Fallback progress reading
+                                val progressJob = coroutineScope.launch(Dispatchers.IO) {
+                                    try {
+                                        while (isActive && !progressPipe.exists()) delay(100)
+                                        progressPipe.bufferedReader().use { reader ->
+                                            var durationMs = (videoDuration * 1000).toLong().takeIf { videoDuration > 0 } ?: 10000
+                                            while (isActive) {
+                                                val line = reader.readLine() ?: continue
+                                                if ("out_time_ms=" in line) {
+                                                    val timeMs = line.substringAfter("out_time_ms=").toLongOrNull() ?: continue
+                                                    val progressPercent = (timeMs / durationMs.toDouble()).coerceIn(0.0, 1.0).toFloat()
+                                                    withContext(Dispatchers.Main) {
+                                                        progress = progressPercent
+                                                    }
+                                                }
+                                                if ("progress=end" in line) break
+                                                delay(100)
+                                            }
                                         }
+                                    } catch (e: Exception) {
+                                        Log.e("FFmpeg", "Progress reading error: ${e.message}")
                                     }
                                 }
 
                                 val session = FFmpegKit.execute(command)
+                                progressJob.cancel()
 
                                 withContext(Dispatchers.Main) {
                                     progress = null
@@ -644,6 +694,7 @@ fun FFmpegTestScreen() {
                                 }
 
                                 tempFile.delete()
+                                progressPipe.delete()
                             } catch (e: Exception) {
                                 withContext(Dispatchers.Main) {
                                     progress = null
@@ -690,7 +741,6 @@ fun FFmpegTestScreen() {
                     )
                 }
             }
-
             Button(
                 onClick = {
                     if (inputUri == null || userCommand.isBlank()) {
@@ -765,7 +815,6 @@ fun FFmpegTestScreen() {
                     isProcessing = true
                     coroutineScope.launch(Dispatchers.IO) {
                         try {
-                            // Validate inputs with FFprobe
                             val inputSaf = FFmpegKitConfig.getSafParameterForRead(context, firstUri)
                             val secondInputSaf = FFmpegKitConfig.getSafParameterForRead(context, secondUri)
                             if (inputSaf.isEmpty() || secondInputSaf.isEmpty()) {
@@ -777,6 +826,7 @@ fun FFmpegTestScreen() {
                             }
                             val tempProbeFile1 = File(context.getExternalFilesDir(null), "temp_probe_join1.mp4")
                             val tempProbeFile2 = File(context.getExternalFilesDir(null), "temp_probe_join2.mp4")
+                            var totalDuration = 0f
                             try {
                                 withTimeout(30000) {
                                     context.contentResolver.openInputStream(firstUri)?.use { inputStream ->
@@ -799,6 +849,12 @@ fun FFmpegTestScreen() {
                             }
                             val probeSession1 = FFprobeKit.execute("-i ${tempProbeFile1.absolutePath} -show_streams -show_format -v quiet -of json")
                             val probeSession2 = FFprobeKit.execute("-i ${tempProbeFile2.absolutePath} -show_streams -show_format -v quiet -of json")
+                            if (ReturnCode.isSuccess(probeSession1.returnCode) && ReturnCode.isSuccess(probeSession2.returnCode)) {
+                                val json1 = JSONObject(probeSession1.output)
+                                val json2 = JSONObject(probeSession2.output)
+                                totalDuration += json1.getJSONObject("format").getString("duration").toFloatOrNull() ?: 0f
+                                totalDuration += json2.getJSONObject("format").getString("duration").toFloatOrNull() ?: 0f
+                            }
                             tempProbeFile1.delete()
                             tempProbeFile2.delete()
                             if (!ReturnCode.isSuccess(probeSession1.returnCode) || !ReturnCode.isSuccess(probeSession2.returnCode)) {
@@ -812,7 +868,6 @@ fun FFmpegTestScreen() {
                                 outputText = "Input 1: ${probeSession1.output}\nInput 2: ${probeSession2.output}"
                             }
 
-                            // Copy SAF inputs to temporary files
                             val tempFile1 = File(context.getExternalFilesDir(null), "temp1.mp4")
                             val tempFile2 = File(context.getExternalFilesDir(null), "temp2.mp4")
                             try {
@@ -846,30 +901,54 @@ fun FFmpegTestScreen() {
                                 return@launch
                             }
 
-                            // Create files.txt for concat demuxer
                             val filesTxt = File(context.getExternalFilesDir(null), "files.txt")
                             val fileContent = "file '${tempFile1.absolutePath}'\nfile '${tempFile2.absolutePath}'"
                             filesTxt.writeText(fileContent)
 
                             val outputFile = File(context.getExternalFilesDir(null), "joined.mp4")
                             val outputFilename = prepareFilename(filename, "joined.mp4", firstUri, isAudio = false)
-                            val command = "-y -f concat -safe 0 -i ${filesTxt.absolutePath} -c:v libx264 -preset fast -crf 23 -c:a aac ${outputFile.absolutePath}"
+                            val progressPipe = File(context.getExternalFilesDir(null), "progress.txt")
+                            val command = "-y -f concat -safe 0 -i ${filesTxt.absolutePath} -c:v libx264 -preset fast -crf 23 -c:a aac -progress ${progressPipe.absolutePath} -stats_period 0.1 ${outputFile.absolutePath}"
 
                             withContext(Dispatchers.Main) {
                                 ffmpegLog = ""
                                 progress = 0f
                             }
                             FFmpegKitConfig.enableStatisticsCallback { statistics ->
+                                Log.d("FFmpeg", "Statistics: time=${statistics.time}")
                                 coroutineScope.launch(Dispatchers.Main) {
-                                    inputDuration?.let { duration ->
-                                        val timeSeconds = statistics.time / 1000.0
-                                        val progressPercent = (timeSeconds / duration).coerceIn(0.0, 1.0).toFloat()
-                                        progress = progressPercent
+                                    val duration = totalDuration.takeIf { it > 0 } ?: 20f // Fallback
+                                    val timeSeconds = statistics.time / 1000.0
+                                    val progressPercent = (timeSeconds / duration).coerceIn(0.0, 1.0).toFloat()
+                                    progress = progressPercent
+                                }
+                            }
+
+                            val progressJob = coroutineScope.launch(Dispatchers.IO) {
+                                try {
+                                    while (isActive && !progressPipe.exists()) delay(100)
+                                    progressPipe.bufferedReader().use { reader ->
+                                        var durationMs = (totalDuration * 1000).toLong().takeIf { totalDuration > 0 } ?: 20000
+                                        while (isActive) {
+                                            val line = reader.readLine() ?: continue
+                                            if ("out_time_ms=" in line) {
+                                                val timeMs = line.substringAfter("out_time_ms=").toLongOrNull() ?: continue
+                                                val progressPercent = (timeMs / durationMs.toDouble()).coerceIn(0.0, 1.0).toFloat()
+                                                withContext(Dispatchers.Main) {
+                                                    progress = progressPercent
+                                                }
+                                            }
+                                            if ("progress=end" in line) break
+                                            delay(100)
+                                        }
                                     }
+                                } catch (e: Exception) {
+                                    Log.e("FFmpeg", "Progress reading error: ${e.message}")
                                 }
                             }
 
                             val session = FFmpegKit.execute(command)
+                            progressJob.cancel()
 
                             withContext(Dispatchers.Main) {
                                 progress = null
@@ -887,6 +966,7 @@ fun FFmpegTestScreen() {
                             tempFile1.delete()
                             tempFile2.delete()
                             filesTxt.delete()
+                            progressPipe.delete()
                         } catch (e: Exception) {
                             withContext(Dispatchers.Main) {
                                 progress = null
