@@ -38,6 +38,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import org.json.JSONObject
 import java.io.File
 import java.io.FileInputStream
 
@@ -105,8 +106,12 @@ fun FFmpegTestScreen() {
     var secondInputUri by remember { mutableStateOf<android.net.Uri?>(null) }
     var videoDuration by remember { mutableStateOf(0f) }
     var clipRange by remember { mutableStateOf(0f..10f) }
+    var originalWidth by remember { mutableStateOf(0) }
+    var originalHeight by remember { mutableStateOf(0) }
+    var scaleWidth by remember { mutableStateOf("") }
+    var scaleHeight by remember { mutableStateOf("") }
 
-
+// Updated selectInputFile launcher
     val selectInputFile = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
     ) { uri ->
@@ -118,19 +123,61 @@ fun FFmpegTestScreen() {
                 )
                 inputUri = it
                 outputText = "Selected input: $it"
-                // Fetch video duration
+                // Fetch video duration and resolution using a temporary file
                 coroutineScope.launch(Dispatchers.IO) {
-                    val safParam = FFmpegKitConfig.getSafParameterForRead(context, it)
-                    val probeSession = FFprobeKit.execute("-i $safParam -show_entries format=duration -v quiet -of csv=\"p=0\"")
-                    if (ReturnCode.isSuccess(probeSession.returnCode)) {
-                        val duration = probeSession.output.toFloatOrNull() ?: 0f
-                        withContext(Dispatchers.Main) {
-                            videoDuration = duration
-                            clipRange = 0f..minOf(10f, duration) // Default to 0–10s or duration
+                    try {
+                        // Copy SAF input to temporary file
+                        val tempFile = File(context.getExternalFilesDir(null), "temp_probe.mp4")
+                        try {
+                            withTimeout(30000) {
+                                context.contentResolver.openInputStream(it)?.use { inputStream ->
+                                    tempFile.outputStream().use { outputStream ->
+                                        val buffer = ByteArray(8192)
+                                        var bytesRead: Int
+                                        while (inputStream.read(buffer).also { bytesRead = it } != -1) {
+                                            outputStream.write(buffer, 0, bytesRead)
+                                        }
+                                        outputStream.flush()
+                                    }
+                                } ?: throw Exception("Failed to open input stream")
+                            }
+                        } catch (e: Exception) {
+                            withContext(Dispatchers.Main) {
+                                outputText = "Failed to copy input for probing: ${e.message}"
+                            }
+                            return@launch
                         }
-                    } else {
+
+                        // Probe duration and resolution in one command
+                        val probeSession = FFprobeKit.execute(
+                            "-i ${tempFile.absolutePath} -show_entries format=duration:stream=width,height -select_streams v:0 -v quiet -of json"
+                        )
+                        tempFile.delete()
+
+                        if (ReturnCode.isSuccess(probeSession.returnCode)) {
+                            val json = JSONObject(probeSession.output)
+                            val format = json.getJSONObject("format")
+                            val duration = format.getString("duration").toFloatOrNull() ?: 0f
+                            val streams = json.getJSONArray("streams")
+                            val stream = streams.getJSONObject(0)
+                            val width = stream.getInt("width")
+                            val height = stream.getInt("height")
+                            withContext(Dispatchers.Main) {
+                                videoDuration = duration
+                                clipRange = 0f..minOf(10f, duration)
+                                originalWidth = width
+                                originalHeight = height
+                                scaleWidth = width.toString()
+                                scaleHeight = height.toString()
+                            }
+                        } else {
+                            withContext(Dispatchers.Main) {
+                                outputText = "Failed to probe video: ${probeSession.failStackTrace ?: "Unknown error"}"
+                            }
+                        }
+                    } catch (e: Exception) {
                         withContext(Dispatchers.Main) {
-                            outputText = "Failed to get duration: ${probeSession.failStackTrace}"
+                            outputText = "Probe error: ${e.message}"
                         }
                     }
                 }
@@ -332,6 +379,7 @@ fun FFmpegTestScreen() {
                 Text("Select Second Input Video")
             }
 
+            // Updated Clip Video button
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -347,8 +395,8 @@ fun FFmpegTestScreen() {
                             outputText = "Please select an input video"
                             return@Button
                         }
-                        if (startTime >= endTime || endTime > videoDuration || startTime < 0) {
-                            outputText = "Invalid clip range: Start must be less than end and within duration ($videoDuration s)"
+                        if (startTime >= endTime || (videoDuration > 0 && endTime > videoDuration) || startTime < 0) {
+                            outputText = "Invalid clip range: Start must be less than end and within duration (${if (videoDuration > 0) videoDuration else "unknown"} s)"
                             return@Button
                         }
                         isProcessing = true
@@ -363,7 +411,24 @@ fun FFmpegTestScreen() {
                                     }
                                     return@launch
                                 }
-                                val probeSession = FFprobeKit.execute("-i $inputSaf -show_streams -show_format -v quiet -of json")
+                                val tempProbeFile = File(context.getExternalFilesDir(null), "temp_probe_clip.mp4")
+                                try {
+                                    withTimeout(30000) {
+                                        context.contentResolver.openInputStream(inputUri!!)?.use { inputStream ->
+                                            tempProbeFile.outputStream().use { outputStream ->
+                                                inputStream.copyTo(outputStream)
+                                            }
+                                        } ?: throw Exception("Failed to open input stream")
+                                    }
+                                } catch (e: Exception) {
+                                    withContext(Dispatchers.Main) {
+                                        outputText = "Failed to copy input for validation: ${e.message}"
+                                        isProcessing = false
+                                    }
+                                    return@launch
+                                }
+                                val probeSession = FFprobeKit.execute("-i ${tempProbeFile.absolutePath} -show_streams -show_format -v quiet -of json")
+                                tempProbeFile.delete()
                                 if (!ReturnCode.isSuccess(probeSession.returnCode)) {
                                     withContext(Dispatchers.Main) {
                                         outputText = "Invalid input file: ${probeSession.failStackTrace ?: "Unknown error"}"
@@ -372,7 +437,7 @@ fun FFmpegTestScreen() {
                                     return@launch
                                 }
 
-                                // Copy SAF input to temporary file
+                                // Copy SAF input to temporary file for clipping
                                 val tempFile = File(context.getExternalFilesDir(null), "temp_clip.mp4")
                                 try {
                                     withTimeout(30000) {
@@ -456,7 +521,7 @@ fun FFmpegTestScreen() {
                             clipRange = range.start.coerceIn(0f, videoDuration) .. range.endInclusive.coerceIn(0f, videoDuration)
                         },
                         valueRange = 0f..videoDuration.coerceAtLeast(1f),
-                        enabled = videoDuration > 0 && !isProcessing
+                        enabled = !isProcessing
                     )
                     Text(
                         text = "Clip: ${String.format("%.1f", clipRange.start)}s to ${String.format("%.1f", clipRange.endInclusive)}s",
@@ -464,64 +529,166 @@ fun FFmpegTestScreen() {
                     )
                 }
             }
-            Button(
-                onClick = {
-                    if (inputUri == null) {
-                        outputText = "Please select an input video first"
-                        return@Button
-                    }
-                    isProcessing = true
-                    coroutineScope.launch(Dispatchers.IO) {
-                        try {
-                            val inputSaf = FFmpegKitConfig.getSafParameterForRead(context, inputUri!!)
-                            if (inputSaf.isEmpty()) {
-                                withContext(Dispatchers.Main) {
-                                    outputText = "Failed to get SAF parameter for input"
-                                    isProcessing = false
+            // Updated Scale Video button
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(8.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Button(
+                    onClick = {
+                        if (inputUri == null) {
+                            outputText = "Please select an input video"
+                            return@Button
+                        }
+                        val width = scaleWidth.toIntOrNull()
+                        val height = scaleHeight.toIntOrNull()
+                        if (width == null || height == null || width <= 0 || height <= 0 || width > 8192 || height > 8192) {
+                            outputText = "Invalid resolution: Width and height must be positive integers (max 8192)"
+                            return@Button
+                        }
+                        isProcessing = true
+                        coroutineScope.launch(Dispatchers.IO) {
+                            try {
+                                // Validate input with FFprobe
+                                val inputSaf = FFmpegKitConfig.getSafParameterForRead(context, inputUri!!)
+                                if (inputSaf.isEmpty()) {
+                                    withContext(Dispatchers.Main) {
+                                        outputText = "Failed to get SAF parameter for input"
+                                        isProcessing = false
+                                    }
+                                    return@launch
                                 }
-                                return@launch
-                            }
-                            val outputFile = File(context.getExternalFilesDir(null), "scaled_output.mp4")
-                            val outputFilename = prepareFilename(filename, "scaled_output.mp4", inputUri, isAudio = false)
-                            val command = "-y -i $inputSaf -vf scale=640:360 -c:v libx264 -crf 0 -preset medium  -c:a copy ${outputFile.absolutePath}"
-                            withContext(Dispatchers.Main) {
-                                ffmpegLog = ""
-                                progress = 0f
-                            }
-                            FFmpegKitConfig.enableStatisticsCallback { statistics ->
-                                coroutineScope.launch(Dispatchers.Main) {
-                                    inputDuration?.let { duration ->
-                                        val timeSeconds = statistics.time / 1000.0
-                                        val progressPercent = (timeSeconds / duration).coerceIn(0.0, 1.0).toFloat()
-                                        progress = progressPercent
+                                val tempProbeFile = File(context.getExternalFilesDir(null), "temp_probe_scale.mp4")
+                                try {
+                                    withTimeout(30000) {
+                                        context.contentResolver.openInputStream(inputUri!!)?.use { inputStream ->
+                                            tempProbeFile.outputStream().use { outputStream ->
+                                                inputStream.copyTo(outputStream)
+                                            }
+                                        } ?: throw Exception("Failed to open input stream")
+                                    }
+                                } catch (e: Exception) {
+                                    withContext(Dispatchers.Main) {
+                                        outputText = "Failed to copy input for validation: ${e.message}"
+                                        isProcessing = false
+                                    }
+                                    return@launch
+                                }
+                                val probeSession = FFprobeKit.execute("-i ${tempProbeFile.absolutePath} -show_streams -show_format -v quiet -of json")
+                                tempProbeFile.delete()
+                                if (!ReturnCode.isSuccess(probeSession.returnCode)) {
+                                    withContext(Dispatchers.Main) {
+                                        outputText = "Invalid input file: ${probeSession.failStackTrace ?: "Unknown error"}"
+                                        isProcessing = false
+                                    }
+                                    return@launch
+                                }
+
+                                // Copy SAF input to temporary file for scaling
+                                val tempFile = File(context.getExternalFilesDir(null), "temp_scale.mp4")
+                                try {
+                                    withTimeout(30000) {
+                                        context.contentResolver.openInputStream(inputUri!!)?.use { inputStream ->
+                                            tempFile.outputStream().use { outputStream ->
+                                                val buffer = ByteArray(8192)
+                                                var bytesRead: Int
+                                                while (inputStream.read(buffer).also { bytesRead = it } != -1) {
+                                                    outputStream.write(buffer, 0, bytesRead)
+                                                }
+                                                outputStream.flush()
+                                            }
+                                        } ?: throw Exception("Failed to open input stream")
+                                    }
+                                } catch (e: TimeoutCancellationException) {
+                                    withContext(Dispatchers.Main) {
+                                        outputText = "Timeout copying input file: ${e.message}"
+                                        isProcessing = false
+                                    }
+                                    return@launch
+                                }
+
+                                val outputFile = File(context.getExternalFilesDir(null), "scaled.mp4")
+                                val outputFilename = prepareFilename(filename, "scaled.mp4", inputUri!!, isAudio = false)
+                                val command = "-y -i ${tempFile.absolutePath} -vf scale=$width:$height -c:v libx264 -preset fast -crf 23 -c:a aac ${outputFile.absolutePath}"
+
+                                withContext(Dispatchers.Main) {
+                                    ffmpegLog = ""
+                                    progress = 0f
+                                }
+                                FFmpegKitConfig.enableStatisticsCallback { statistics ->
+                                    coroutineScope.launch(Dispatchers.Main) {
+                                        inputDuration?.let { duration ->
+                                            val timeSeconds = statistics.time / 1000.0
+                                            val progressPercent = (timeSeconds / duration).coerceIn(0.0, 1.0).toFloat()
+                                            progress = progressPercent
+                                        }
                                     }
                                 }
-                            }
-                            val session = FFmpegKit.execute(command)
-                            withContext(Dispatchers.Main) {
-                                progress = null
-                                isProcessing = false
-                                outputText = if (ReturnCode.isSuccess(session.returnCode)) {
-                                    "Scaled video saved to ${outputFile.absolutePath}\n${session.output}"
-                                } else {
-                                    "Scale failed: ${session.failStackTrace ?: "No stack trace"}\nLogs:\n$ffmpegLog"
+
+                                val session = FFmpegKit.execute(command)
+
+                                withContext(Dispatchers.Main) {
+                                    progress = null
+                                    isProcessing = false
+                                    outputText = if (ReturnCode.isSuccess(session.returnCode)) {
+                                        "Scaled video saved to ${outputFile.absolutePath}\n${session.output}"
+                                    } else {
+                                        "Scale failed: ${session.failStackTrace ?: "No stack trace"}\nLogs:\n$ffmpegLog"
+                                    }
+                                }
+                                if (ReturnCode.isSuccess(session.returnCode)) {
+                                    copyFileToDownloads(outputFile, outputFilename, isAudio = false)
+                                }
+
+                                tempFile.delete()
+                            } catch (e: Exception) {
+                                withContext(Dispatchers.Main) {
+                                    progress = null
+                                    isProcessing = false
+                                    outputText = "Scale error: ${e.message}\nLogs:\n$ffmpegLog"
                                 }
                             }
-                            if (ReturnCode.isSuccess(session.returnCode)) {
-                                copyFileToDownloads(outputFile, outputFilename, isAudio = false)
-                            }
-                        } catch (e: Exception) {
-                            withContext(Dispatchers.Main) {
-                                progress = null
-                                isProcessing = false
-                                outputText = "Scale error: ${e.message}\nLogs:\n$ffmpegLog"
-                            }
                         }
+                    },
+                    enabled = !isProcessing,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Text("Scale Video")
+                }
+
+                Column(
+                    modifier = Modifier
+                        .weight(2f)
+                        .padding(start = 8.dp)
+                ) {
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        OutlinedTextField(
+                            value = scaleWidth,
+                            onValueChange = { scaleWidth = it.filter { c -> c.isDigit() } },
+                            label = { Text("Width") },
+                            modifier = Modifier.weight(1f),
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                            enabled = !isProcessing
+                        )
+                        OutlinedTextField(
+                            value = scaleHeight,
+                            onValueChange = { scaleHeight = it.filter { c -> c.isDigit() } },
+                            label = { Text("Height") },
+                            modifier = Modifier.weight(1f),
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                            enabled = !isProcessing
+                        )
                     }
-                },
-                enabled = !isProcessing
-            ) {
-                Text("Scale Video (640x360)")
+                    Text(
+                        text = "Original: ${if (originalWidth > 0) originalWidth else "Unknown"}x${if (originalHeight > 0) originalHeight else "Unknown"}",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
             }
 
             Button(
@@ -586,6 +753,7 @@ fun FFmpegTestScreen() {
             ) {
                 Text("Run Custom Command")
             }
+            // Updated Join Videos button (minimal changes)
             Button(
                 onClick = {
                     val firstUri = inputUri
@@ -607,8 +775,32 @@ fun FFmpegTestScreen() {
                                 }
                                 return@launch
                             }
-                            val probeSession1 = FFprobeKit.execute("-i $inputSaf -show_streams -show_format -v quiet -of json")
-                            val probeSession2 = FFprobeKit.execute("-i $secondInputSaf -show_streams -show_format -v quiet -of json")
+                            val tempProbeFile1 = File(context.getExternalFilesDir(null), "temp_probe_join1.mp4")
+                            val tempProbeFile2 = File(context.getExternalFilesDir(null), "temp_probe_join2.mp4")
+                            try {
+                                withTimeout(30000) {
+                                    context.contentResolver.openInputStream(firstUri)?.use { inputStream ->
+                                        tempProbeFile1.outputStream().use { outputStream ->
+                                            inputStream.copyTo(outputStream)
+                                        }
+                                    } ?: throw Exception("Failed to open first input stream")
+                                    context.contentResolver.openInputStream(secondUri)?.use { inputStream ->
+                                        tempProbeFile2.outputStream().use { outputStream ->
+                                            inputStream.copyTo(outputStream)
+                                        }
+                                    } ?: throw Exception("Failed to open second input stream")
+                                }
+                            } catch (e: Exception) {
+                                withContext(Dispatchers.Main) {
+                                    outputText = "Failed to copy inputs for validation: ${e.message}"
+                                    isProcessing = false
+                                }
+                                return@launch
+                            }
+                            val probeSession1 = FFprobeKit.execute("-i ${tempProbeFile1.absolutePath} -show_streams -show_format -v quiet -of json")
+                            val probeSession2 = FFprobeKit.execute("-i ${tempProbeFile2.absolutePath} -show_streams -show_format -v quiet -of json")
+                            tempProbeFile1.delete()
+                            tempProbeFile2.delete()
                             if (!ReturnCode.isSuccess(probeSession1.returnCode) || !ReturnCode.isSuccess(probeSession2.returnCode)) {
                                 withContext(Dispatchers.Main) {
                                     outputText = "Invalid input files:\nFirst: ${probeSession1.failStackTrace ?: "Unknown error"}\nSecond: ${probeSession2.failStackTrace ?: "Unknown error"}"
@@ -624,7 +816,7 @@ fun FFmpegTestScreen() {
                             val tempFile1 = File(context.getExternalFilesDir(null), "temp1.mp4")
                             val tempFile2 = File(context.getExternalFilesDir(null), "temp2.mp4")
                             try {
-                                withTimeout(30000) { // 30-second timeout for copying
+                                withTimeout(30000) {
                                     context.contentResolver.openInputStream(firstUri)?.use { inputStream ->
                                         tempFile1.outputStream().use { outputStream ->
                                             val buffer = ByteArray(8192)
@@ -677,7 +869,6 @@ fun FFmpegTestScreen() {
                                 }
                             }
 
-                            // Execute FFmpeg
                             val session = FFmpegKit.execute(command)
 
                             withContext(Dispatchers.Main) {
@@ -693,7 +884,6 @@ fun FFmpegTestScreen() {
                                 copyFileToDownloads(outputFile, outputFilename, isAudio = false)
                             }
 
-                            // Clean up temporary files
                             tempFile1.delete()
                             tempFile2.delete()
                             filesTxt.delete()
