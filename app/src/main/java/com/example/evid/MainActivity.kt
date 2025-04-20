@@ -33,8 +33,11 @@ import com.arthenica.ffmpegkit.FFprobeKit
 import com.arthenica.ffmpegkit.ReturnCode
 import com.example.evid.ui.theme.EviDTheme
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import java.io.File
 import java.io.FileInputStream
 
@@ -99,6 +102,10 @@ fun FFmpegTestScreen() {
     var isProcessing by remember { mutableStateOf(false) }
     val scrollState = rememberScrollState()
     val coroutineScope = rememberCoroutineScope()
+    var secondInputUri by remember { mutableStateOf<android.net.Uri?>(null) }
+    var videoDuration by remember { mutableStateOf(0f) }
+    var clipRange by remember { mutableStateOf(0f..10f) }
+
 
     val selectInputFile = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
@@ -111,15 +118,19 @@ fun FFmpegTestScreen() {
                 )
                 inputUri = it
                 outputText = "Selected input: $it"
+                // Fetch video duration
                 coroutineScope.launch(Dispatchers.IO) {
-                    val inputSaf = FFmpegKitConfig.getSafParameterForRead(context, it)
-                    val probeSession = FFprobeKit.execute("-i $inputSaf -show_entries format=duration -v quiet -of csv=\"p=0\"")
-                    withContext(Dispatchers.Main) {
-                        if (ReturnCode.isSuccess(probeSession.returnCode)) {
-                            inputDuration = probeSession.output.toDoubleOrNull()
-                            outputText += "\nInput duration: ${inputDuration ?: "Unknown"} seconds"
-                        } else {
-                            outputText += "\nFailed to get duration: ${probeSession.failStackTrace ?: "No stack trace"}"
+                    val safParam = FFmpegKitConfig.getSafParameterForRead(context, it)
+                    val probeSession = FFprobeKit.execute("-i $safParam -show_entries format=duration -v quiet -of csv=\"p=0\"")
+                    if (ReturnCode.isSuccess(probeSession.returnCode)) {
+                        val duration = probeSession.output.toFloatOrNull() ?: 0f
+                        withContext(Dispatchers.Main) {
+                            videoDuration = duration
+                            clipRange = 0f..minOf(10f, duration) // Default to 0–10s or duration
+                        }
+                    } else {
+                        withContext(Dispatchers.Main) {
+                            outputText = "Failed to get duration: ${probeSession.failStackTrace}"
                         }
                     }
                 }
@@ -128,7 +139,6 @@ fun FFmpegTestScreen() {
             }
         }
     }
-
     fun getOriginalFilename(uri: android.net.Uri): String? {
         var filename: String? = null
         val cursor: Cursor? = context.contentResolver.query(uri, null, null, null, null)
@@ -296,66 +306,164 @@ fun FFmpegTestScreen() {
                 Text("Select Input Video")
             }
 
+            val selectSecondInputFile = rememberLauncherForActivityResult(
+                contract = ActivityResultContracts.OpenDocument()
+            ) { uri ->
+                uri?.let {
+                    try {
+                        context.contentResolver.takePersistableUriPermission(
+                            it,
+                            android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION
+                        )
+                        secondInputUri = it
+                        outputText = "Selected second input: $it"
+                    } catch (e: Exception) {
+                        outputText = "Failed to persist second input URI: ${e.message}"
+                    }
+                }
+            }
+
             Button(
                 onClick = {
-                    if (inputUri == null) {
-                        outputText = "Please select an input video first"
-                        return@Button
-                    }
-                    isProcessing = true
-                    coroutineScope.launch(Dispatchers.IO) {
-                        try {
-                            val inputSaf = FFmpegKitConfig.getSafParameterForRead(context, inputUri!!)
-                            if (inputSaf.isEmpty()) {
-                                withContext(Dispatchers.Main) {
-                                    outputText = "Failed to get SAF parameter for input"
-                                    isProcessing = false
-                                }
-                                return@launch
-                            }
-                            val outputFile = File(context.getExternalFilesDir(null), "clipped_output.mp4")
-                            val outputFilename = prepareFilename(filename, "clipped_output.mp4", inputUri, isAudio = false)
-                            val command = "-y -i $inputSaf -ss 00:00:00 -t 10 -c:v mpeg4 -preset fast -crf 0 -c:a aac ${outputFile.absolutePath}"
-                            withContext(Dispatchers.Main) {
-                                ffmpegLog = ""
-                                progress = 0f
-                            }
-                            FFmpegKitConfig.enableStatisticsCallback { statistics ->
-                                coroutineScope.launch(Dispatchers.Main) {
-                                    inputDuration?.let { duration ->
-                                        val timeSeconds = statistics.time / 1000.0
-                                        val progressPercent = (timeSeconds / duration).coerceIn(0.0, 1.0).toFloat()
-                                        progress = progressPercent
-                                    }
-                                }
-                            }
-                            val session = FFmpegKit.execute(command)
-                            withContext(Dispatchers.Main) {
-                                progress = null
-                                isProcessing = false
-                                outputText = if (ReturnCode.isSuccess(session.returnCode)) {
-                                    "Clipped video saved to ${outputFile.absolutePath}\n${session.output}"
-                                } else {
-                                    "Clip failed: ${session.failStackTrace ?: "No stack trace"}\nLogs:\n$ffmpegLog"
-                                }
-                            }
-                            if (ReturnCode.isSuccess(session.returnCode)) {
-                                copyFileToDownloads(outputFile, outputFilename, isAudio = false)
-                            }
-                        } catch (e: Exception) {
-                            withContext(Dispatchers.Main) {
-                                progress = null
-                                isProcessing = false
-                                outputText = "Clip error: ${e.message}\nLogs:\n$ffmpegLog"
-                            }
-                        }
-                    }
+                    selectSecondInputFile.launch(arrayOf("video/*"))
                 },
                 enabled = !isProcessing
             ) {
-                Text("Clip Video (10s)")
+                Text("Select Second Input Video")
             }
 
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(8.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Button(
+                    onClick = {
+                        val startTime = clipRange.start
+                        val endTime = clipRange.endInclusive
+                        if (inputUri == null) {
+                            outputText = "Please select an input video"
+                            return@Button
+                        }
+                        if (startTime >= endTime || endTime > videoDuration || startTime < 0) {
+                            outputText = "Invalid clip range: Start must be less than end and within duration ($videoDuration s)"
+                            return@Button
+                        }
+                        isProcessing = true
+                        coroutineScope.launch(Dispatchers.IO) {
+                            try {
+                                // Validate input with FFprobe
+                                val inputSaf = FFmpegKitConfig.getSafParameterForRead(context, inputUri!!)
+                                if (inputSaf.isEmpty()) {
+                                    withContext(Dispatchers.Main) {
+                                        outputText = "Failed to get SAF parameter for input"
+                                        isProcessing = false
+                                    }
+                                    return@launch
+                                }
+                                val probeSession = FFprobeKit.execute("-i $inputSaf -show_streams -show_format -v quiet -of json")
+                                if (!ReturnCode.isSuccess(probeSession.returnCode)) {
+                                    withContext(Dispatchers.Main) {
+                                        outputText = "Invalid input file: ${probeSession.failStackTrace ?: "Unknown error"}"
+                                        isProcessing = false
+                                    }
+                                    return@launch
+                                }
+
+                                // Copy SAF input to temporary file
+                                val tempFile = File(context.getExternalFilesDir(null), "temp_clip.mp4")
+                                try {
+                                    withTimeout(30000) {
+                                        context.contentResolver.openInputStream(inputUri!!)?.use { inputStream ->
+                                            tempFile.outputStream().use { outputStream ->
+                                                val buffer = ByteArray(8192)
+                                                var bytesRead: Int
+                                                while (inputStream.read(buffer).also { bytesRead = it } != -1) {
+                                                    outputStream.write(buffer, 0, bytesRead)
+                                                }
+                                                outputStream.flush()
+                                            }
+                                        } ?: throw Exception("Failed to open input stream")
+                                    }
+                                } catch (e: TimeoutCancellationException) {
+                                    withContext(Dispatchers.Main) {
+                                        outputText = "Timeout copying input file: ${e.message}"
+                                        isProcessing = false
+                                    }
+                                    return@launch
+                                }
+
+                                val outputFile = File(context.getExternalFilesDir(null), "clipped.mp4")
+                                val outputFilename = prepareFilename(filename, "clipped.mp4", inputUri!!, isAudio = false)
+                                val duration = endTime - startTime
+                                val command = "-y -i ${tempFile.absolutePath} -ss $startTime -t $duration -c:v libx264 -preset fast -crf 23 -c:a aac ${outputFile.absolutePath}"
+
+                                withContext(Dispatchers.Main) {
+                                    ffmpegLog = ""
+                                    progress = 0f
+                                }
+                                FFmpegKitConfig.enableStatisticsCallback { statistics ->
+                                    coroutineScope.launch(Dispatchers.Main) {
+                                        inputDuration?.let { duration ->
+                                            val timeSeconds = statistics.time / 1000.0
+                                            val progressPercent = (timeSeconds / duration).coerceIn(0.0, 1.0).toFloat()
+                                            progress = progressPercent
+                                        }
+                                    }
+                                }
+
+                                val session = FFmpegKit.execute(command)
+
+                                withContext(Dispatchers.Main) {
+                                    progress = null
+                                    isProcessing = false
+                                    outputText = if (ReturnCode.isSuccess(session.returnCode)) {
+                                        "Clipped video saved to ${outputFile.absolutePath}\n${session.output}"
+                                    } else {
+                                        "Clip failed: ${session.failStackTrace ?: "No stack trace"}\nLogs:\n$ffmpegLog"
+                                    }
+                                }
+                                if (ReturnCode.isSuccess(session.returnCode)) {
+                                    copyFileToDownloads(outputFile, outputFilename, isAudio = false)
+                                }
+
+                                tempFile.delete()
+                            } catch (e: Exception) {
+                                withContext(Dispatchers.Main) {
+                                    progress = null
+                                    isProcessing = false
+                                    outputText = "Clip error: ${e.message}\nLogs:\n$ffmpegLog"
+                                }
+                            }
+                        }
+                    },
+                    enabled = !isProcessing,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Text("Clip Video")
+                }
+
+                Column(
+                    modifier = Modifier
+                        .weight(2f)
+                        .padding(start = 8.dp)
+                ) {
+                    RangeSlider(
+                        value = clipRange,
+                        onValueChange = { range ->
+                            clipRange = range.start.coerceIn(0f, videoDuration) .. range.endInclusive.coerceIn(0f, videoDuration)
+                        },
+                        valueRange = 0f..videoDuration.coerceAtLeast(1f),
+                        enabled = videoDuration > 0 && !isProcessing
+                    )
+                    Text(
+                        text = "Clip: ${String.format("%.1f", clipRange.start)}s to ${String.format("%.1f", clipRange.endInclusive)}s",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+            }
             Button(
                 onClick = {
                     if (inputUri == null) {
@@ -477,6 +585,130 @@ fun FFmpegTestScreen() {
                 enabled = !isProcessing
             ) {
                 Text("Run Custom Command")
+            }
+            Button(
+                onClick = {
+                    val firstUri = inputUri
+                    val secondUri = secondInputUri
+                    if (firstUri == null || secondUri == null) {
+                        outputText = "Please select both input videos"
+                        return@Button
+                    }
+                    isProcessing = true
+                    coroutineScope.launch(Dispatchers.IO) {
+                        try {
+                            // Validate inputs with FFprobe
+                            val inputSaf = FFmpegKitConfig.getSafParameterForRead(context, firstUri)
+                            val secondInputSaf = FFmpegKitConfig.getSafParameterForRead(context, secondUri)
+                            if (inputSaf.isEmpty() || secondInputSaf.isEmpty()) {
+                                withContext(Dispatchers.Main) {
+                                    outputText = "Failed to get SAF parameter for inputs"
+                                    isProcessing = false
+                                }
+                                return@launch
+                            }
+                            val probeSession1 = FFprobeKit.execute("-i $inputSaf -show_streams -show_format -v quiet -of json")
+                            val probeSession2 = FFprobeKit.execute("-i $secondInputSaf -show_streams -show_format -v quiet -of json")
+                            if (!ReturnCode.isSuccess(probeSession1.returnCode) || !ReturnCode.isSuccess(probeSession2.returnCode)) {
+                                withContext(Dispatchers.Main) {
+                                    outputText = "Invalid input files:\nFirst: ${probeSession1.failStackTrace ?: "Unknown error"}\nSecond: ${probeSession2.failStackTrace ?: "Unknown error"}"
+                                    isProcessing = false
+                                }
+                                return@launch
+                            }
+                            withContext(Dispatchers.Main) {
+                                outputText = "Input 1: ${probeSession1.output}\nInput 2: ${probeSession2.output}"
+                            }
+
+                            // Copy SAF inputs to temporary files
+                            val tempFile1 = File(context.getExternalFilesDir(null), "temp1.mp4")
+                            val tempFile2 = File(context.getExternalFilesDir(null), "temp2.mp4")
+                            try {
+                                withTimeout(30000) { // 30-second timeout for copying
+                                    context.contentResolver.openInputStream(firstUri)?.use { inputStream ->
+                                        tempFile1.outputStream().use { outputStream ->
+                                            val buffer = ByteArray(8192)
+                                            var bytesRead: Int
+                                            while (inputStream.read(buffer).also { bytesRead = it } != -1) {
+                                                outputStream.write(buffer, 0, bytesRead)
+                                            }
+                                            outputStream.flush()
+                                        }
+                                    } ?: throw Exception("Failed to open first input stream")
+                                    context.contentResolver.openInputStream(secondUri)?.use { inputStream ->
+                                        tempFile2.outputStream().use { outputStream ->
+                                            val buffer = ByteArray(8192)
+                                            var bytesRead: Int
+                                            while (inputStream.read(buffer).also { bytesRead = it } != -1) {
+                                                outputStream.write(buffer, 0, bytesRead)
+                                            }
+                                            outputStream.flush()
+                                        }
+                                    } ?: throw Exception("Failed to open second input stream")
+                                }
+                            } catch (e: TimeoutCancellationException) {
+                                withContext(Dispatchers.Main) {
+                                    outputText = "Timeout copying input files: ${e.message}"
+                                    isProcessing = false
+                                }
+                                return@launch
+                            }
+
+                            // Create files.txt for concat demuxer
+                            val filesTxt = File(context.getExternalFilesDir(null), "files.txt")
+                            val fileContent = "file '${tempFile1.absolutePath}'\nfile '${tempFile2.absolutePath}'"
+                            filesTxt.writeText(fileContent)
+
+                            val outputFile = File(context.getExternalFilesDir(null), "joined.mp4")
+                            val outputFilename = prepareFilename(filename, "joined.mp4", firstUri, isAudio = false)
+                            val command = "-y -f concat -safe 0 -i ${filesTxt.absolutePath} -c:v libx264 -preset fast -crf 23 -c:a aac ${outputFile.absolutePath}"
+
+                            withContext(Dispatchers.Main) {
+                                ffmpegLog = ""
+                                progress = 0f
+                            }
+                            FFmpegKitConfig.enableStatisticsCallback { statistics ->
+                                coroutineScope.launch(Dispatchers.Main) {
+                                    inputDuration?.let { duration ->
+                                        val timeSeconds = statistics.time / 1000.0
+                                        val progressPercent = (timeSeconds / duration).coerceIn(0.0, 1.0).toFloat()
+                                        progress = progressPercent
+                                    }
+                                }
+                            }
+
+                            // Execute FFmpeg
+                            val session = FFmpegKit.execute(command)
+
+                            withContext(Dispatchers.Main) {
+                                progress = null
+                                isProcessing = false
+                                outputText = if (ReturnCode.isSuccess(session.returnCode)) {
+                                    "Joined video saved to ${outputFile.absolutePath}\n${session.output}"
+                                } else {
+                                    "Join failed: ${session.failStackTrace ?: "No stack trace"}\nLogs:\n$ffmpegLog"
+                                }
+                            }
+                            if (ReturnCode.isSuccess(session.returnCode)) {
+                                copyFileToDownloads(outputFile, outputFilename, isAudio = false)
+                            }
+
+                            // Clean up temporary files
+                            tempFile1.delete()
+                            tempFile2.delete()
+                            filesTxt.delete()
+                        } catch (e: Exception) {
+                            withContext(Dispatchers.Main) {
+                                progress = null
+                                isProcessing = false
+                                outputText = "Join error: ${e.message}\nLogs:\n$ffmpegLog"
+                            }
+                        }
+                    }
+                },
+                enabled = !isProcessing
+            ) {
+                Text("Join Videos")
             }
 
             Text(
