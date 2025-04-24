@@ -1,0 +1,9 @@
+ffmpeg commands
+
+To audio
+    1. Lossy
+        a. ffmpeg -i input.mp4 -vn -c:a aac -b:a 256k output.aac
+        b.
+    2. Lossless
+        a. ffmpeg -i input.mp4 -vn -c:a flac output.flac
+        b. ffmpeg -i input.mp4 -vn -acodec pcm_s16le output.wav
