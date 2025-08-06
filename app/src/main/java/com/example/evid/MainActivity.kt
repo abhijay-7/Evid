@@ -1,93 +1,93 @@
+// File: app/src/main/java/com/videoeditor/MainActivity.kt
 package com.example.evid
 
-import android.Manifest
-import android.content.ContentValues
-import android.content.pm.PackageManager
-import android.database.Cursor
-import android.os.Build
 import android.os.Bundle
-import android.os.Environment
-import android.provider.MediaStore
-import android.util.Log
-import android.widget.Toast
 import androidx.activity.ComponentActivity
-import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
-import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
-import androidx.core.content.ContextCompat
-import androidx.core.view.WindowCompat
-import com.arthenica.ffmpegkit.FFmpegKit
-import com.arthenica.ffmpegkit.FFmpegKitConfig
-import com.arthenica.ffmpegkit.FFprobeKit
-import com.arthenica.ffmpegkit.ReturnCode
-import com.example.evid.ui.FFmpegTestScreen2
+import com.example.evid.permissions.PermissionManager
+import com.example.evid.permissions.rememberPermissionManager
+import com.example.evid.ui.components.PermissionRequestScreen
 import com.example.evid.ui.theme.EviDTheme
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.TimeoutCancellationException
-import kotlinx.coroutines.async
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeout
-import org.json.JSONObject
-import java.io.File
-import java.io.FileInputStream
 
 class MainActivity : ComponentActivity() {
+    private lateinit var permissionManager: PermissionManager
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // Enable edge-to-edge display
-        WindowCompat.setDecorFitsSystemWindows(window, false)
+        enableEdgeToEdge()
 
+
+        permissionManager = PermissionManager(this)
+        permissionManager.registerLaunchers()
         setContent {
             EviDTheme {
-                // Request storage permissions
-                RequestStoragePermissions()
-                // Main UI
-                FFmpegTestScreen2()
+                VideoEditorApp(permissionManager)
             }
         }
     }
 }
 
-
 @Composable
-fun RequestStoragePermissions() {
-    val context = LocalContext.current
-    val permissionLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.RequestMultiplePermissions()
-    ) { permissions ->
-        if (permissions.all { it.value }) {
-            Toast.makeText(context, "Storage permissions granted", Toast.LENGTH_SHORT).show()
-        } else {
-            Toast.makeText(context, "Storage permissions denied", Toast.LENGTH_SHORT).show()
-        }
-    }
+fun VideoEditorApp(permissionManager: PermissionManager) {
+
+    var hasPermissions by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
-        val permissions = arrayOf(
-            Manifest.permission.READ_EXTERNAL_STORAGE,
-            Manifest.permission.WRITE_EXTERNAL_STORAGE
+        hasPermissions = permissionManager.checkPermissions()
+    }
+
+    if (hasPermissions) {
+        VideoEditorMainScreen()
+    } else {
+        PermissionRequestScreen(
+            permissionManager = permissionManager,
+            onPermissionsGranted = {
+                hasPermissions = true
+            }
         )
-        if (permissions.all {
-                ContextCompat.checkSelfPermission(context, it) == PackageManager.PERMISSION_GRANTED
-            }) {
-            // Permissions already granted
-        } else {
-            permissionLauncher.launch(permissions)
+    }
+}
+
+@Composable
+fun VideoEditorMainScreen() {
+    Surface(
+        modifier = Modifier.fillMaxSize(),
+        color = MaterialTheme.colorScheme.background
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(16.dp)
+        ) {
+            Card(
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(
+                    modifier = Modifier.padding(16.dp)
+                ) {
+                    Text(
+                        text = "Video Editor",
+                        style = MaterialTheme.typography.headlineMedium
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "Feature 1.1.1: Video Analysis & Metadata Extraction - Completed ✓",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "Ready for video analysis implementation",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+            }
         }
     }
 }
