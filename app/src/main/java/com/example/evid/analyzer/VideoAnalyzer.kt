@@ -1,4 +1,3 @@
-// File: app/src/main/java/com/videoeditor/analyzer/VideoAnalyzer.kt
 package com.example.evid.analyzer
 
 import android.content.Context

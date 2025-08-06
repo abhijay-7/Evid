@@ -1,0 +1,148 @@
+package com.example.evid
+
+import android.content.Intent
+import android.net.Uri
+import android.os.Bundle
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.layout.*
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.dp
+import com.example.evid.analyzer.VideoAnalyzer
+import com.example.evid.analyzer.VideoAnalysisResult
+import com.example.evid.data.VideoMetadata
+import com.example.evid.permissions.PermissionManager
+import com.example.evid.permissions.rememberPermissionManager
+import com.example.evid.ui.components.PermissionRequestScreen
+import com.example.evid.ui.theme.EviDTheme
+import kotlinx.coroutines.launch
+
+class MainActivity : ComponentActivity() {
+
+    private lateinit var permissionManager: PermissionManager
+    private lateinit var videoAnalyzer: VideoAnalyzer
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        enableEdgeToEdge()
+
+        permissionManager = PermissionManager(this)
+        permissionManager.registerLaunchers()
+        videoAnalyzer = VideoAnalyzer(this)
+
+        setContent {
+            EviDTheme {
+                VideoEditorApp(permissionManager, videoAnalyzer)
+            }
+        }
+    }
+}
+
+@Composable
+fun VideoEditorApp(
+    permissionManager: PermissionManager,
+    videoAnalyzer: VideoAnalyzer
+) {
+    var hasPermissions by remember { mutableStateOf(false) }
+
+    LaunchedEffect(Unit) {
+        hasPermissions = permissionManager.checkPermissions()
+    }
+
+    if (hasPermissions) {
+        VideoEditorMainScreen(videoAnalyzer)
+    } else {
+        PermissionRequestScreen(
+            permissionManager = permissionManager,
+            onPermissionsGranted = {
+                hasPermissions = true
+            }
+        )
+    }
+}
+@Composable
+fun VideoEditorMainScreen(videoAnalyzer: VideoAnalyzer) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+
+    var selectedUri by remember { mutableStateOf<Uri?>(null) }
+    var analysisResult by remember { mutableStateOf<VideoAnalysisResult?>(null) }
+
+    val launcher = rememberLauncherForActivityResult (
+        contract = ActivityResultContracts.GetContent()
+    ) { uri: Uri? ->
+        selectedUri = uri
+        if (uri != null) {
+            scope.launch {
+                analysisResult = videoAnalyzer.analyzeVideo(uri)
+            }
+        }
+    }
+
+    Surface(
+        modifier = Modifier.fillMaxSize(),
+        color = MaterialTheme.colorScheme.background
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(16.dp)
+        ) {
+            Text(
+                text = "Video Analyzer",
+                style = MaterialTheme.typography.headlineMedium
+            )
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            Button(onClick = { launcher.launch("video/*") }) {
+                Text("Pick a Video File")
+            }
+
+            Spacer(modifier = Modifier.height(24.dp))
+
+            when (val result = analysisResult) {
+                is VideoAnalysisResult.Success -> {
+                    val metadata = result.metadata
+                    MetadataDisplay(metadata)
+                }
+                is VideoAnalysisResult.Error -> {
+                    Text("Error: ${result.message}", color = MaterialTheme.colorScheme.error)
+                }
+                is VideoAnalysisResult.FileNotFound -> {
+                    Text("Error: File not found", color = MaterialTheme.colorScheme.error)
+                }
+                is VideoAnalysisResult.InvalidFile -> {
+                    Text("Error: Invalid video file", color = MaterialTheme.colorScheme.error)
+                }
+                null -> {
+                    Text("No video selected or analyzed yet.")
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun MetadataDisplay(metadata: VideoMetadata) {
+    Column(modifier = Modifier.padding(8.dp)) {
+        Text("File Name: ${metadata.fileName}")
+        Text("Resolution: ${metadata.resolutionString}")
+        Text("Duration: ${metadata.durationFormatted}")
+        Text("Aspect Ratio: ${metadata.getAspectRatioString()}")
+        Text("Frame Rate: ${metadata.frameRateDescription}")
+        Text("Bitrate: ${metadata.bitRateFormatted}")
+        Text("Codec: ${metadata.codec}")
+        Text("MIME Type: ${metadata.mimeType}")
+        Text("File Size: ${metadata.fileSizeFormatted}")
+        Text("Quality: ${metadata.qualityDescription}")
+        Text("Compression Ratio: ${metadata.compressionRatio}")
+        Text("Rotation: ${metadata.rotation}°")
+    }
+}
