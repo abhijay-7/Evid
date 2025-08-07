@@ -2,6 +2,7 @@ plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
+    kotlin("plugin.parcelize")
 }
 
 android {
@@ -72,10 +73,14 @@ dependencies {
     implementation(files("./repo/smart-exception-java-0.2.1.jar"))
     implementation(files("./repo/smart-exception-common-0.2.1.jar"))
 
+    implementation("androidx.work:work-runtime-ktx:2.8.1")
+    implementation("org.json:json:20230227")
     // Alternative: Use Maven Central for smart exceptions
     // implementation("com.arthenica:smart-exception-common:0.2.1")
     // implementation("com.arthenica:smart-exception-java:0.2.1")
 
+
+    implementation("androidx.compose.material:material-icons-extended:1.6.1")
     // Compose and Android dependencies
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
@@ -85,6 +90,7 @@ dependencies {
     implementation(libs.androidx.ui.graphics)
     implementation(libs.androidx.ui.tooling.preview)
     implementation(libs.androidx.material3)
+    implementation(libs.androidx.media3.common.ktx)
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)

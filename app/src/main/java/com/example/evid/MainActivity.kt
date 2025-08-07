@@ -12,13 +12,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.example.evid.permissions.PermissionManager
 import com.example.evid.ui.components.PermissionRequestScreen
+import com.example.evid.ui.screens.AudioExtractionScreen
 import com.example.evid.ui.screens.FrameExtractionScreen
 import com.example.evid.ui.theme.EviDTheme
-import android.Manifest
-import android.content.Context
-import android.net.Uri
-import androidx.core.content.FileProvider
-import java.io.File
 
 class MainActivity : ComponentActivity() {
     private lateinit var permissionManager: PermissionManager
@@ -63,7 +59,8 @@ fun VideoEditorMainScreen() {
 
     val tabs = listOf(
         "Overview",
-        "Frame Extraction"
+        "Frame Extraction",
+        "Audio Extraction"
     )
 
     Column(
@@ -82,6 +79,7 @@ fun VideoEditorMainScreen() {
         when (selectedTab) {
             0 -> OverviewScreen()
             1 -> FrameExtractionScreen()
+            2 -> AudioExtractionScreen()
         }
     }
 }
@@ -112,7 +110,6 @@ fun OverviewScreen() {
                     )
                     Spacer(modifier = Modifier.height(16.dp))
 
-                    // Feature Status List
                     FeatureStatusItem(
                         feature = "1.1.1: Video Analysis & Metadata Extraction",
                         status = "Completed",
@@ -127,10 +124,18 @@ fun OverviewScreen() {
                         isCompleted = true
                     )
 
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    FeatureStatusItem(
+                        feature = "1.1.3: Audio Extraction System",
+                        status = "Completed",
+                        isCompleted = true
+                    )
+
                     Spacer(modifier = Modifier.height(16.dp))
 
                     Text(
-                        text = "Ready for video analysis and frame extraction",
+                        text = "Ready for video analysis, frame, and audio extraction",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.primary
                     )

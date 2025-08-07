@@ -1,5 +1,6 @@
 package com.example.evid.data
 
+
 import android.os.Parcelable
 import kotlinx.parcelize.Parcelize
 
@@ -17,7 +18,8 @@ data class VideoMetadata(
     val fileSize: Long,
     val hash: String,
     val creationTime: Long,
-    val rotation: Int = 0
+    val rotation: Int = 0,
+    val audioTracks: List<AudioTrackMetadata> = emptyList()
 ) : Parcelable {
 
     val aspectRatio: Float
@@ -29,7 +31,6 @@ data class VideoMetadata(
             val hours = totalSeconds / 3600
             val minutes = (totalSeconds % 3600) / 60
             val seconds = totalSeconds % 60
-
             return if (hours > 0) {
                 "%02d:%02d:%02d".format(hours, minutes, seconds)
             } else {
@@ -45,7 +46,6 @@ data class VideoMetadata(
             val kb = fileSize / 1024.0
             val mb = kb / 1024.0
             val gb = mb / 1024.0
-
             return when {
                 gb >= 1 -> "%.2f GB".format(gb)
                 mb >= 1 -> "%.2f MB".format(mb)
@@ -84,7 +84,6 @@ data class VideoMetadata(
         get() {
             val kbps = bitRate / 1000.0
             val mbps = kbps / 1000.0
-
             return if (mbps >= 1) {
                 "%.1f Mbps".format(mbps)
             } else {
@@ -133,7 +132,8 @@ data class VideoMetadata(
                 fileSize = 0L,
                 hash = "",
                 creationTime = 0L,
-                rotation = 0
+                rotation = 0,
+                audioTracks = emptyList()
             )
         }
 
@@ -143,4 +143,31 @@ data class VideoMetadata(
             return extension in videoExtensions
         }
     }
+}
+
+@Parcelize
+data class AudioTrackMetadata(
+    val index: Int,
+    val sampleRate: Int,
+    val channels: Int,
+    val bitrate: Long,
+    val codec: String
+) : Parcelable {
+    val bitrateFormatted: String
+        get() {
+            val kbps = bitrate / 1000.0
+            val mbps = kbps / 1000.0
+            return if (mbps >= 1) {
+                "%.1f Mbps".format(mbps)
+            } else {
+                "%.0f Kbps".format(kbps)
+            }
+        }
+
+    val channelsDescription: String
+        get() = when (channels) {
+            1 -> "Mono"
+            2 -> "Stereo"
+            else -> "$channels Channels"
+        }
 }

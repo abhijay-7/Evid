@@ -1,14 +1,17 @@
 package com.example.evid.analyzer
 
 import android.content.Context
-import android.media.MediaMetadataRetriever
 import android.net.Uri
+import com.arthenica.ffmpegkit.FFprobeKit
+import com.arthenica.ffmpegkit.ReturnCode
+import com.example.evid.data.AudioTrackMetadata
 import com.example.evid.data.VideoMetadata
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import org.json.JSONObject
 import java.io.File
-import java.security.MessageDigest
 import java.io.FileInputStream
+import java.security.MessageDigest
 
 class VideoAnalyzer(private val context: Context) {
 
@@ -23,20 +26,7 @@ class VideoAnalyzer(private val context: Context) {
                 return@withContext VideoAnalysisResult.InvalidFile
             }
 
-            val retriever = MediaMetadataRetriever()
-
-            try {
-                retriever.setDataSource(filePath)
-                extractMetadata(retriever, file)
-            } catch (e: Exception) {
-                VideoAnalysisResult.Error(e, "Failed to analyze video: ${e.message}")
-            } finally {
-                try {
-                    retriever.release()
-                } catch (e: Exception) {
-                    // Ignore release errors
-                }
-            }
+            extractMetadata(file)
         } catch (e: Exception) {
             VideoAnalysisResult.Error(e, "Unexpected error during video analysis: ${e.message}")
         }
@@ -44,183 +34,108 @@ class VideoAnalyzer(private val context: Context) {
 
     suspend fun analyzeVideo(uri: Uri): VideoAnalysisResult = withContext(Dispatchers.IO) {
         try {
-            val retriever = MediaMetadataRetriever()
-
+            val tempFile = File(context.getExternalFilesDir(null), "temp_probe.mp4")
             try {
-                retriever.setDataSource(context, uri)
-                extractMetadataFromUri(retriever, uri)
-            } catch (e: Exception) {
-                VideoAnalysisResult.Error(e, "Failed to analyze video from URI: ${e.message}")
+                context.contentResolver.openInputStream(uri)?.use { inputStream ->
+                    tempFile.outputStream().use { outputStream ->
+                        inputStream.copyTo(outputStream)
+                    }
+                } ?: return@withContext VideoAnalysisResult.Error(Exception("Failed to open input stream"), "Failed to read URI")
+                extractMetadata(tempFile, uri)
             } finally {
-                try {
-                    retriever.release()
-                } catch (e: Exception) {
-                    // Ignore release errors
-                }
+                tempFile.delete()
             }
         } catch (e: Exception) {
             VideoAnalysisResult.Error(e, "Unexpected error during video analysis: ${e.message}")
         }
     }
 
-    private suspend fun extractMetadata(
-        retriever: MediaMetadataRetriever,
-        file: File
-    ): VideoAnalysisResult = withContext(Dispatchers.IO) {
+    private suspend fun extractMetadata(file: File, uri: Uri? = null): VideoAnalysisResult = withContext(Dispatchers.IO) {
         try {
-            // Extract basic metadata
-            val duration = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
-            val width = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull() ?: 0
-            val height = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull() ?: 0
-            val frameRate = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_CAPTURE_FRAMERATE)?.toFloatOrNull() ?: 30f
-            val bitRate = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_BITRATE)?.toIntOrNull() ?: 0
-            val mimeType = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_MIMETYPE) ?: "video/unknown"
-            val rotation = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)?.toIntOrNull() ?: 0
-
-            // Extract codec information
-            val codec = extractCodecInfo(retriever, mimeType)
-
-            // Generate file hash for cache validation
-            val hash = generateFileHash(file)
-
-            val metadata = VideoMetadata(
-                filePath = file.absolutePath,
-                fileName = file.name,
-                duration = duration,
-                width = width,
-                height = height,
-                frameRate = frameRate,
-                bitRate = bitRate,
-                codec = codec,
-                mimeType = mimeType,
-                fileSize = file.length(),
-                hash = hash,
-                creationTime = file.lastModified(),
-                rotation = rotation
+            val probeSession = FFprobeKit.execute(
+                "-i ${file.absolutePath} -show_entries format=duration,bit_rate:stream=width,height,codec_name,codec_type,sample_rate,channels,bit_rate -v quiet -of json"
             )
-
-            VideoAnalysisResult.Success(metadata)
-
-        } catch (e: Exception) {
-            VideoAnalysisResult.Error(e, "Failed to extract metadata: ${e.message}")
-        }
-    }
-
-    private suspend fun extractMetadataFromUri(
-        retriever: MediaMetadataRetriever,
-        uri: Uri
-    ): VideoAnalysisResult = withContext(Dispatchers.IO) {
-        try {
-            // Extract basic metadata
-            val duration = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
-            val width = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull() ?: 0
-            val height = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull() ?: 0
-            val frameRate = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_CAPTURE_FRAMERATE)?.toFloatOrNull() ?: 30f
-            val bitRate = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_BITRATE)?.toIntOrNull() ?: 0
-            val mimeType = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_MIMETYPE) ?: "video/unknown"
-            val rotation = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)?.toIntOrNull() ?: 0
-
-            // Extract codec information
-            val codec = extractCodecInfo(retriever, mimeType)
-
-            // Get file size from content resolver
-            val fileSize = getFileSizeFromUri(uri)
-
-            // Generate hash from URI content
-            val hash = generateHashFromUri(uri)
-
-            val metadata = VideoMetadata(
-                filePath = uri.toString(),
-                fileName = getFileNameFromUri(uri),
-                duration = duration,
-                width = width,
-                height = height,
-                frameRate = frameRate,
-                bitRate = bitRate,
-                codec = codec,
-                mimeType = mimeType,
-                fileSize = fileSize,
-                hash = hash,
-                creationTime = System.currentTimeMillis(),
-                rotation = rotation
-            )
-
-            VideoAnalysisResult.Success(metadata)
-
-        } catch (e: Exception) {
-            VideoAnalysisResult.Error(e, "Failed to extract metadata from URI: ${e.message}")
-        }
-    }
-
-    private fun extractCodecInfo(retriever: MediaMetadataRetriever, mimeType: String): String {
-        return try {
-            // First try to get codec from MIME type (more reliable)
-            val codecFromMime = when {
-                mimeType.contains("avc") || mimeType.contains("h264") -> "H.264/AVC"
-                mimeType.contains("hevc") || mimeType.contains("h265") -> "H.265/HEVC"
-                mimeType.contains("vp8") -> "VP8"
-                mimeType.contains("vp9") -> "VP9"
-                mimeType.contains("av01") -> "AV1"
-                mimeType.contains("mpeg4") -> "MPEG-4"
-                mimeType.contains("mpeg2") -> "MPEG-2"
-                mimeType.contains("wmv") -> "WMV"
-                mimeType.contains("flv") -> "FLV"
-                else -> null
+            if (!ReturnCode.isSuccess(probeSession.returnCode)) {
+                return@withContext VideoAnalysisResult.Error(
+                    Exception(probeSession.failStackTrace ?: "Unknown error"),
+                    "Failed to probe video"
+                )
             }
 
-            if (codecFromMime != null) {
-                return codecFromMime
-            }
+            val json = JSONObject(probeSession.output)
+            val format = json.getJSONObject("format")
+            val duration = (format.getString("duration").toFloatOrNull()?.times(1000)?.toLong()) ?: 0L
+            val formatBitRate = format.getString("bit_rate").toLongOrNull() ?: 0L
 
-            // Try to get additional metadata that might contain codec info
-            // Note: METADATA_KEY_VIDEO_CODEC is not available in all Android versions
-            val additionalMetadata = mutableListOf<String>()
+            val streams = json.getJSONArray("streams")
+            var width = 0
+            var height = 0
+            var videoCodec = "Unknown Codec"
+            var frameRate = 30f
+            val audioTracks = mutableListOf<AudioTrackMetadata>()
 
-            // Try various metadata keys that might contain codec information
-            listOf(
-                MediaMetadataRetriever.METADATA_KEY_TITLE,
-                MediaMetadataRetriever.METADATA_KEY_COMPOSER,
-                MediaMetadataRetriever.METADATA_KEY_GENRE
-            ).forEach { key ->
-                try {
-                    retriever.extractMetadata(key)?.let { value ->
-                        if (value.contains("codec", ignoreCase = true) ||
-                            value.contains("h264", ignoreCase = true) ||
-                            value.contains("h265", ignoreCase = true) ||
-                            value.contains("hevc", ignoreCase = true)) {
-                            additionalMetadata.add(value)
+            for (i in 0 until streams.length()) {
+                val stream = streams.getJSONObject(i)
+                val codecType = stream.getString("codec_type")
+                if (codecType == "video") {
+                    width = stream.getInt("width")
+                    height = stream.getInt("height")
+                    videoCodec = stream.getString("codec_name")
+                    frameRate = stream.optString("r_frame_rate").let { rate ->
+                        if (rate.contains("/")) {
+                            val (num, den) = rate.split("/").map { it.toFloatOrNull() ?: 1f }
+                            if (den != 0f) num / den else 30f
+                        } else {
+                            rate.toFloatOrNull() ?: 30f
                         }
                     }
-                } catch (e: Exception) {
-                    // Ignore errors when trying to extract metadata
+                } else if (codecType == "audio") {
+                    audioTracks.add(
+                        AudioTrackMetadata(
+                            index = i,
+                            sampleRate = stream.getInt("sample_rate"),
+                            channels = stream.getInt("channels"),
+                            bitrate = stream.getString("bit_rate").toLongOrNull() ?: 0L,
+                            codec = stream.getString("codec_name")
+                        )
+                    )
                 }
             }
 
-            // Analyze additional metadata for codec hints
-            additionalMetadata.firstOrNull()?.let { metadata ->
-                when {
-                    metadata.contains("h264", ignoreCase = true) ||
-                            metadata.contains("avc", ignoreCase = true) -> return "H.264/AVC"
-                    metadata.contains("h265", ignoreCase = true) ||
-                            metadata.contains("hevc", ignoreCase = true) -> return "H.265/HEVC"
-                    metadata.contains("vp8", ignoreCase = true) -> return "VP8"
-                    metadata.contains("vp9", ignoreCase = true) -> return "VP9"
-                    else -> {}
-                }
+            val mimeType = when (file.extension.lowercase()) {
+                "mp4", "m4v" -> "video/mp4"
+                "avi" -> "video/avi"
+                "mov" -> "video/quicktime"
+                "mkv" -> "video/x-matroska"
+                "webm" -> "video/webm"
+                else -> "video/unknown"
             }
 
-            // Fallback: analyze by file extension or container format
-            when {
-                mimeType.contains("mp4") -> "H.264/AVC (assumed)"
-                mimeType.contains("webm") -> "VP8/VP9 (assumed)"
-                mimeType.contains("avi") -> "Various (AVI)"
-                mimeType.contains("mov") -> "H.264/AVC (assumed)"
-                mimeType.contains("mkv") -> "Various (MKV)"
-                else -> "Unknown Codec"
-            }
+            val hash = generateFileHash(file)
+            val fileSize = uri?.let { getFileSizeFromUri(it) } ?: file.length()
+            val fileName = uri?.let { getFileNameFromUri(it) } ?: file.name
+            val filePath = uri?.toString() ?: file.absolutePath
 
+            VideoAnalysisResult.Success(
+                VideoMetadata(
+                    filePath = filePath,
+                    fileName = fileName,
+                    duration = duration,
+                    width = width,
+                    height = height,
+                    frameRate = frameRate,
+                    bitRate = formatBitRate.toInt(),
+                    codec = videoCodec,
+                    mimeType = mimeType,
+                    fileSize = fileSize,
+                    hash = hash,
+                    creationTime = file.lastModified(),
+                    rotation = 0, // FFprobe may not provide rotation reliably; consider additional logic if needed
+                    audioTracks = audioTracks
+                )
+            )
         } catch (e: Exception) {
-            "Unknown Codec"
+            VideoAnalysisResult.Error(e, "Failed to extract metadata: ${e.message}")
         }
     }
 
@@ -238,29 +153,7 @@ class VideoAnalyzer(private val context: Context) {
             fis.close()
             digest.digest().joinToString("") { "%02x".format(it) }
         } catch (e: Exception) {
-            // Fallback to file path + size + modified time hash
             val fallbackString = "${file.absolutePath}:${file.length()}:${file.lastModified()}"
-            MessageDigest.getInstance("MD5").digest(fallbackString.toByteArray())
-                .joinToString("") { "%02x".format(it) }
-        }
-    }
-
-    private suspend fun generateHashFromUri(uri: Uri): String = withContext(Dispatchers.IO) {
-        try {
-            val digest = MessageDigest.getInstance("SHA-256")
-            context.contentResolver.openInputStream(uri)?.use { inputStream ->
-                val buffer = ByteArray(8192)
-                var bytesRead: Int
-
-                while (inputStream.read(buffer).also { bytesRead = it } != -1) {
-                    digest.update(buffer, 0, bytesRead)
-                }
-            }
-
-            digest.digest().joinToString("") { "%02x".format(it) }
-        } catch (e: Exception) {
-            // Fallback hash based on URI and timestamp
-            val fallbackString = "${uri}:${System.currentTimeMillis()}"
             MessageDigest.getInstance("MD5").digest(fallbackString.toByteArray())
                 .joinToString("") { "%02x".format(it) }
         }
